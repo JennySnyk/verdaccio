@@ -316,11 +316,12 @@ describe('endpoint unit test', () => {
 
       test('should fetch a scoped tarball from remote uplink', (done) => {
         request(app)
-          .get('/@jquery/jquery/-/@jquery/jquery-1.5.1.tgz')
+          .get('/@jquery/jquery/-/jquery-1.5.1.tgz')
           .expect(HEADER_TYPE.CONTENT_TYPE, HEADERS.OCTET_STREAM)
           .expect(HTTP_STATUS.OK)
           .end(function (err, res) {
             if (err) {
+              console.log('err', err);
               return done(err);
             }
 

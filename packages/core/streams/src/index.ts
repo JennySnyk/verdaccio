@@ -1,9 +1,11 @@
 import { PassThrough, TransformOptions } from 'stream';
 
+//  @deprecated use PassThrough with addAbortSignal https://nodejs.org/api/stream.html#streamaddabortsignalsignal-stream
 export interface IReadTarball {
   abort?: () => void;
 }
 
+//  @deprecated use PassThrough with addAbortSignal https://nodejs.org/api/stream.html#streamaddabortsignalsignal-stream
 export interface IUploadTarball {
   done?: () => void;
   abort?: () => void;
@@ -13,6 +15,7 @@ export interface IUploadTarball {
  * This stream is used to read tarballs from repository.
  * @param {*} options
  * @return {Stream}
+ * @deprecated use PassThrough with addAbortSignal https://nodejs.org/api/stream.html#streamaddabortsignalsignal-stream
  */
 class ReadTarball extends PassThrough implements IReadTarball {
   /**
@@ -32,6 +35,7 @@ class ReadTarball extends PassThrough implements IReadTarball {
  * This stream is used to upload tarballs to a repository.
  * @param {*} options
  * @return {Stream}
+ * @deprecated use PassThrough with addAbortSignal https://nodejs.org/api/stream.html#streamaddabortsignalsignal-stream
  */
 class UploadTarball extends PassThrough implements IUploadTarball {
   /**

@@ -2,14 +2,19 @@ import assert from 'assert';
 import buildDebug from 'debug';
 import _ from 'lodash';
 import { PassThrough } from 'stream';
-import UrlNode from 'url';
+import { default as URL } from 'url';
 
 import { errorUtils, pkgUtils, pluginUtils, searchUtils, validatioUtils } from '@verdaccio/core';
-import { API_ERROR, DIST_TAGS, HTTP_STATUS, SUPPORT_ERRORS, USERS } from '@verdaccio/core';
-import { VerdaccioError } from '@verdaccio/core';
+import {
+  API_ERROR,
+  DIST_TAGS,
+  HTTP_STATUS,
+  SUPPORT_ERRORS,
+  USERS,
+  VerdaccioError,
+} from '@verdaccio/core';
 import { loadPlugin } from '@verdaccio/loaders';
 import LocalDatabase from '@verdaccio/local-storage';
-import { ReadTarball, UploadTarball } from '@verdaccio/streams';
 import {
   Author,
   Callback,
@@ -17,9 +22,8 @@ import {
   Config,
   DistFile,
   IPackageStorage,
-  IReadTarball,
-  IUploadTarball,
   Logger,
+  Manifest,
   MergeTags,
   Package,
   StorageUpdateCallback,
@@ -28,8 +32,8 @@ import {
   TokenFilter,
   Version,
 } from '@verdaccio/types';
-import { getLatestVersion, isObject } from '@verdaccio/utils';
-import { createTarballHash, normalizeContributors } from '@verdaccio/utils';
+import { isObject } from '@verdaccio/utils';
+import { normalizeContributors } from '@verdaccio/utils';
 
 import {
   STORAGE,
@@ -38,8 +42,8 @@ import {
   generateRevision,
   getLatestReadme,
   normalizePackage,
-  tagVersion,
 } from './storage-utils';
+import { tagVersion } from './versions-utils';
 
 const debug = buildDebug('verdaccio:storage:local');
 
@@ -111,37 +115,17 @@ class LocalStorage {
     return;
   }
 
-  public addPackage(name: string, pkg: Package, callback: Callback): void {
-    debug(`creating a package for`, name);
-    const storage: any = this._getLocalStorage(name);
-
-    if (_.isNil(storage)) {
-      debug(`storage is missing for %o package cannot be added`, name);
-      return callback(errorUtils.getNotFound('this package cannot be added'));
+  public getStoragePlugin(): IPluginStorage {
+    if (this.storagePlugin === null) {
+      throw errorUtils.getInternalError('storage plugin is not initialized');
     }
 
-    storage.createPackage(name, generatePackageTemplate(name), (err) => {
-      if (
-        _.isNull(err) === false &&
-        (err.code === STORAGE.FILE_EXIST_ERROR || err.code === HTTP_STATUS.CONFLICT)
-      ) {
-        debug(`error on creating a package for %o with error %o`, name, err.message);
-        return callback(errorUtils.getConflict());
-      }
-
-      const latest = getLatestVersion(pkg);
-      if (_.isNil(latest) === false && pkg.versions[latest]) {
-        debug('latest version found %o for %o', latest, name);
-        return callback(null, pkg.versions[latest]);
-      }
-
-      debug('no latest version found for %o', name);
-      return callback();
-    });
+    return this.storagePlugin;
   }
 
   /**
    * Remove package with all it contents.
+   * @deprecated move this to storage or abastract-storage
    */
   public async removePackage(name: string): Promise<void> {
     debug('remove package %s', name);
@@ -152,6 +136,7 @@ class LocalStorage {
     }
 
     return new Promise((resolve, reject) => {
+      // FIXME: remove async from promise callback
       storage.readPackage(name, async (err, data: Package): Promise<void> => {
         if (_.isNil(err) === false) {
           if (err.code === STORAGE.NO_SUCH_FILE_ERROR || err.code === HTTP_STATUS.NOT_FOUND) {
@@ -188,183 +173,103 @@ class LocalStorage {
   }
 
   /**
-   * Synchronize remote package info with the local one
-   * @param {*} name
-   * @param {*} packageInfo
-   * @param {*} callback
-   */
-  public updateVersions(name: string, packageInfo: Package, callback: Callback): void {
+    Updates the local cache with the merge from the remote/client manifest.
+
+    The steps are the following.
+    1. Get the latest version of the package from the cache.
+    2. If does not exist will return a 
+
+    @param name
+    @param remoteManifest
+    @returns return a merged manifest.
+  */
+  public async updateVersionsNext(name: string, remoteManifest: Manifest): Promise<Manifest> {
     debug(`updating versions for package %o`, name);
-    this._readCreatePackage(name, (err, packageLocalJson): void => {
-      if (err) {
-        return callback(err);
-      }
+    let cacheManifest: Manifest = await this.readCreatePackageNext(name);
+    let change = false;
+    // updating readme
+    cacheManifest.readme = getLatestReadme(remoteManifest);
+    if (remoteManifest.readme !== cacheManifest.readme) {
+      debug('manifest readme updated for %o', name);
+      change = true;
+    }
 
-      let change = false;
-      // updating readme
-      packageLocalJson.readme = getLatestReadme(packageInfo);
-      if (packageInfo.readme !== packageLocalJson.readme) {
+    debug('updating new remote versions');
+    for (const versionId in remoteManifest.versions) {
+      // if detect a new remote version does not exist cache
+      if (_.isNil(cacheManifest.versions[versionId])) {
+        debug('new version from upstream %o', versionId);
+        let version = remoteManifest.versions[versionId];
+
+        // we don't keep readme for package versions,
+        // only one readme per package
+        // TODO: readme clean up could be  saved in configured eventually
+        version = cleanUpReadme(version);
+        debug('clean up readme for %o', versionId);
+        version.contributors = normalizeContributors(version.contributors as Author[]);
+
         change = true;
-      }
+        cacheManifest.versions[versionId] = version;
 
-      debug('update versions');
-      for (const versionId in packageInfo.versions) {
-        if (_.isNil(packageLocalJson.versions[versionId])) {
-          let version = packageInfo.versions[versionId];
-
-          // we don't keep readme for package versions,
-          // only one readme per package
-          version = cleanUpReadme(version);
-          debug('clean up readme for %o', versionId);
-          version.contributors = normalizeContributors(version.contributors as Author[]);
-
-          change = true;
-          packageLocalJson.versions[versionId] = version;
-
-          if (version?.dist?.tarball) {
-            const urlObject: any = UrlNode.parse(version.dist.tarball);
-            const filename = urlObject.pathname.replace(/^.*\//, '');
-
-            // we do NOT overwrite any existing records
-            if (_.isNil(packageLocalJson._distfiles[filename])) {
-              const hash: DistFile = (packageLocalJson._distfiles[filename] = {
-                url: version.dist.tarball,
-                sha: version.dist.shasum,
-              });
-              const upLink: string = version[Symbol.for('__verdaccio_uplink')];
-
-              if (_.isNil(upLink) === false) {
-                this._updateUplinkToRemoteProtocol(hash, upLink);
-              }
+        if (version?.dist?.tarball) {
+          const filename = pkgUtils.extractTarballName(version.dist.tarball);
+          // store a fast access to the dist file by tarball name
+          // it does NOT overwrite any existing records
+          if (_.isNil(cacheManifest?._distfiles[filename])) {
+            const hash: DistFile = (cacheManifest._distfiles[filename] = {
+              url: version.dist.tarball,
+              sha: version.dist.shasum,
+            });
+            // store cache metadata this the manifest
+            const upLink: string = version[Symbol.for('__verdaccio_uplink')];
+            if (_.isNil(upLink) === false) {
+              this._updateUplinkToRemoteProtocol(hash, upLink);
             }
           }
         }
-      }
-
-      debug('update dist-tags');
-      for (const tag in packageInfo[DIST_TAGS]) {
-        if (
-          !packageLocalJson[DIST_TAGS][tag] ||
-          packageLocalJson[DIST_TAGS][tag] !== packageInfo[DIST_TAGS][tag]
-        ) {
-          change = true;
-          packageLocalJson[DIST_TAGS][tag] = packageInfo[DIST_TAGS][tag];
-        }
-      }
-
-      for (const up in packageInfo._uplinks) {
-        if (Object.prototype.hasOwnProperty.call(packageInfo._uplinks, up)) {
-          const need_change =
-            !isObject(packageLocalJson._uplinks[up]) ||
-            packageInfo._uplinks[up].etag !== packageLocalJson._uplinks[up].etag ||
-            packageInfo._uplinks[up].fetched !== packageLocalJson._uplinks[up].fetched;
-
-          if (need_change) {
-            change = true;
-            packageLocalJson._uplinks[up] = packageInfo._uplinks[up];
-          }
-        }
-      }
-
-      debug('update time');
-      if ('time' in packageInfo && !_.isEqual(packageLocalJson.time, packageInfo.time)) {
-        packageLocalJson.time = packageInfo.time;
-        change = true;
-      }
-
-      if (change) {
-        debug('updating package info %o', name);
-        this._writePackage(name, packageLocalJson, function (err): void {
-          callback(err, packageLocalJson);
-        });
       } else {
-        callback(null, packageLocalJson);
+        debug('no new versions from upstream %s', name);
       }
-    });
-  }
+    }
 
-  /**
-   * Add a new version to a previous local package.
-   * @param {*} name
-   * @param {*} version
-   * @param {*} metadata
-   * @param {*} tag
-   * @param {*} callback
-   */
-  public addVersion(
-    name: string,
-    version: string,
-    metadata: Version,
-    tag: StringValue,
-    callback: Callback
-  ): void {
-    debug(`add version %s package for %s`, version, name);
-    this._updatePackage(
-      name,
-      async (data, cb: Callback): Promise<void> => {
-        debug('%s package is being updated', name);
-        // keep only one readme per package
-        data.readme = metadata.readme;
-        debug('%s` readme mutated', name);
-        // TODO: lodash remove
-        metadata = cleanUpReadme(metadata);
-        metadata.contributors = normalizeContributors(metadata.contributors as Author[]);
-        debug('%s` contributors normalized', name);
-        const hasVersion = data.versions[version] != null;
-        if (hasVersion) {
-          debug('%s version %s already exists', name, version);
-          return cb(errorUtils.getConflict());
+    debug('update dist-tags');
+    for (const tag in remoteManifest[DIST_TAGS]) {
+      if (
+        !cacheManifest[DIST_TAGS][tag] ||
+        cacheManifest[DIST_TAGS][tag] !== remoteManifest[DIST_TAGS][tag]
+      ) {
+        change = true;
+        cacheManifest[DIST_TAGS][tag] = remoteManifest[DIST_TAGS][tag];
+      }
+    }
+
+    for (const up in remoteManifest._uplinks) {
+      if (Object.prototype.hasOwnProperty.call(remoteManifest._uplinks, up)) {
+        const need_change =
+          !isObject(cacheManifest._uplinks[up]) ||
+          remoteManifest._uplinks[up].etag !== cacheManifest._uplinks[up].etag ||
+          remoteManifest._uplinks[up].fetched !== cacheManifest._uplinks[up].fetched;
+
+        if (need_change) {
+          change = true;
+          cacheManifest._uplinks[up] = remoteManifest._uplinks[up];
         }
+      }
+    }
 
-        // if uploaded tarball has a different shasum, it's very likely that we
-        // have some kind of error
-        if (validatioUtils.isObject(metadata.dist) && _.isString(metadata.dist.tarball)) {
-          const tarball = metadata.dist.tarball.replace(/.*\//, '');
+    debug('update time');
+    if ('time' in remoteManifest && !_.isEqual(cacheManifest.time, remoteManifest.time)) {
+      cacheManifest.time = remoteManifest.time;
+      change = true;
+    }
 
-          if (validatioUtils.isObject(data._attachments[tarball])) {
-            if (
-              _.isNil(data._attachments[tarball].shasum) === false &&
-              _.isNil(metadata.dist.shasum) === false
-            ) {
-              if (data._attachments[tarball].shasum != metadata.dist.shasum) {
-                const errorMessage =
-                  `shasum error, ` +
-                  `${data._attachments[tarball].shasum} != ${metadata.dist.shasum}`;
-                return cb(errorUtils.getBadRequest(errorMessage));
-              }
-            }
-
-            const currentDate = new Date().toISOString();
-
-            // some old storage do not have this field #740
-            if (_.isNil(data.time)) {
-              data.time = {};
-            }
-
-            data.time['modified'] = currentDate;
-
-            if ('created' in data.time === false) {
-              data.time.created = currentDate;
-            }
-
-            data.time[version] = currentDate;
-            data._attachments[tarball].version = version;
-          }
-        }
-
-        data.versions[version] = metadata;
-        tagVersion(data, version, tag);
-
-        try {
-          debug('%s` add on database', name);
-          await this.storagePlugin.add(name);
-          cb();
-        } catch (err: any) {
-          cb(errorUtils.getBadData(err.message));
-        }
-      },
-      callback
-    );
+    if (change) {
+      debug('updating package info %o', name);
+      await this.writePackageNext(name, cacheManifest);
+      return cacheManifest;
+    } else {
+      return cacheManifest;
+    }
   }
 
   public async addVersionNext(
@@ -374,7 +279,7 @@ class LocalStorage {
     tag: StringValue
   ): Promise<void> {
     debug(`add version %s package for %s`, version, name);
-    await this.updatePackageNext(name, async (data: Package): Promise<Package> => {
+    await this.updatePackageNext(name, async (data: Manifest): Promise<Manifest> => {
       debug('%s package is being updated', name);
       // keep only one readme per package
       data.readme = metadata.readme;
@@ -545,98 +450,22 @@ class LocalStorage {
    * @param {*} callback
    * @return {Function}
    */
-  public changePackage(
-    name: string,
-    incomingPkg: Package,
-    revision: string | undefined,
-    callback: Callback
-  ): void {
-    debug(`change package tags for %o revision %s`, name, revision);
-    if (
-      !validatioUtils.isObject(incomingPkg.versions) ||
-      !validatioUtils.isObject(incomingPkg[DIST_TAGS])
-    ) {
-      debug(`change package bad data for %o`, name);
-      return callback(errorUtils.getBadData());
-    }
-
-    debug(`change package udapting package for %o`, name);
-    this._updatePackage(
-      name,
-      (localData: Package, cb: CallbackAction): void => {
-        for (const version in localData.versions) {
-          const incomingVersion = incomingPkg.versions[version];
-          if (_.isNil(incomingVersion)) {
-            this.logger.info({ name: name, version: version }, 'unpublishing @{name}@@{version}');
-
-            // FIXME: I prefer return a new object rather mutate the metadata
-            delete localData.versions[version];
-            delete localData.time![version];
-
-            for (const file in localData._attachments) {
-              if (localData._attachments[file].version === version) {
-                delete localData._attachments[file].version;
-              }
-            }
-          } else if (Object.prototype.hasOwnProperty.call(incomingVersion, 'deprecated')) {
-            const incomingDeprecated = incomingVersion.deprecated;
-            if (incomingDeprecated != localData.versions[version].deprecated) {
-              if (!incomingDeprecated) {
-                this.logger.info(
-                  { name: name, version: version },
-                  'undeprecating @{name}@@{version}'
-                );
-                delete localData.versions[version].deprecated;
-              } else {
-                this.logger.info(
-                  { name: name, version: version },
-                  'deprecating @{name}@@{version}'
-                );
-                localData.versions[version].deprecated = incomingDeprecated;
-              }
-              localData.time!.modified = new Date().toISOString();
-            }
-          }
-        }
-
-        localData[USERS] = incomingPkg[USERS];
-        localData[DIST_TAGS] = incomingPkg[DIST_TAGS];
-        cb(null);
-      },
-      function (err): void {
-        if (err) {
-          return callback(err);
-        }
-        callback();
-      }
-    );
-  }
-
-  /**
-   * Update the package metadata, tags and attachments (tarballs).
-   * Note: Currently supports unpublishing and deprecation.
-   * @param {*} name
-   * @param {*} incomingPkg
-   * @param {*} revision
-   * @param {*} callback
-   * @return {Function}
-   */
   public async changePackageNext(
     name: string,
-    incomingPkg: Package,
+    incomingPkg: Manifest,
     revision: string | undefined
   ): Promise<void> {
-    debug(`change package tags for %o revision %s`, name, revision);
+    debug(`change manifest tags for %o revision %s`, name, revision);
     if (
       !validatioUtils.isObject(incomingPkg.versions) ||
       !validatioUtils.isObject(incomingPkg[DIST_TAGS])
     ) {
-      debug(`change package bad data for %o`, name);
+      debug(`change manifest bad data for %o`, name);
       throw errorUtils.getBadData();
     }
 
-    debug(`change package udapting package for %o`, name);
-    await this.updatePackageNext(name, async (localData: Package): Promise<Package> => {
+    debug(`change manifest udapting manifest for %o`, name);
+    await this.updatePackageNext(name, async (localData: Manifest): Promise<Manifest> => {
       for (const version in localData.versions) {
         const incomingVersion = incomingPkg.versions[version];
         if (_.isNil(incomingVersion)) {
@@ -728,206 +557,11 @@ class LocalStorage {
   }
 
   /**
-   * Add a tarball.
-   * @param {String} name
-   * @param {String} filename
-   * @return {Stream}
-   */
-  public addTarball(name: string, filename: string): IUploadTarball {
-    debug(`add a tarball for %o`, name);
-    assert(validatioUtils.validateName(filename));
-
-    let length = 0;
-    const shaOneHash = createTarballHash();
-    const uploadStream: IUploadTarball = new UploadTarball({});
-    const _transform = uploadStream._transform;
-    const storage = this._getLocalStorage(name);
-
-    uploadStream.abort = function (): void {};
-    uploadStream.done = function (): void {};
-
-    uploadStream._transform = function (data, ...args): void {
-      shaOneHash.update(data);
-      // measure the length for validation reasons
-      length += data.length;
-      const appliedData = [data, ...args];
-      // FIXME: not sure about this approach, tsc complains
-      // @ts-ignore
-      _transform.apply(uploadStream, appliedData);
-    };
-
-    if (name === PROTO_NAME) {
-      process.nextTick((): void => {
-        uploadStream.emit('error', errorUtils.getForbidden());
-      });
-      return uploadStream;
-    }
-
-    // FIXME: this condition will never met, storage is always defined
-    if (!storage) {
-      process.nextTick((): void => {
-        uploadStream.emit('error', "can't upload this package");
-      });
-      return uploadStream;
-    }
-
-    const writeStream: IUploadTarball = storage.writeTarball(filename);
-
-    writeStream.on('error', (err) => {
-      // @ts-ignore
-      if (err.code === STORAGE.FILE_EXIST_ERROR || err.code === HTTP_STATUS.CONFLICT) {
-        uploadStream.emit('error', errorUtils.getConflict());
-        uploadStream.abort();
-        // @ts-ignore
-      } else if (err.code === STORAGE.NO_SUCH_FILE_ERROR || err.code === HTTP_STATUS.NOT_FOUND) {
-        // check if package exists to throw an appropriate message
-        this.getPackageMetadata(name, function (_err: VerdaccioError): void {
-          if (_err) {
-            uploadStream.emit('error', _err);
-          } else {
-            uploadStream.emit('error', err);
-          }
-        });
-      } else {
-        uploadStream.emit('error', err);
-      }
-    });
-
-    writeStream.on('open', function (): void {
-      // re-emitting open because it's handled in storage.js
-      uploadStream.emit('open');
-    });
-
-    writeStream.on('success', (): void => {
-      this._updatePackage(
-        name,
-        function updater(data, cb): void {
-          // FUTURE: move this to tarballUtils
-          data._attachments[filename] = {
-            shasum: shaOneHash.digest('hex'),
-          };
-          cb(null);
-        },
-        function (err): void {
-          if (err) {
-            // FIXME: if the update package fails, remove tarball to avoid left
-            // orphan tarballs
-            uploadStream.emit('error', err);
-          } else {
-            uploadStream.emit('success');
-          }
-        }
-      );
-    });
-
-    uploadStream.abort = function (): void {
-      writeStream.abort();
-    };
-
-    uploadStream.done = function (): void {
-      if (!length) {
-        uploadStream.emit('error', errorUtils.getBadData('refusing to accept zero-length file'));
-        writeStream.abort();
-      } else {
-        writeStream.done();
-      }
-    };
-
-    uploadStream.pipe(writeStream);
-
-    return uploadStream;
-  }
-
-  /**
-   * Get a tarball.
-   * @param {*} name
-   * @param {*} filename
-   * @return {ReadTarball}
-   */
-  public getTarball(name: string, filename: string): IReadTarball {
-    assert(validatioUtils.validateName(filename));
-
-    const storage: IPackageStorage = this._getLocalStorage(name);
-
-    if (_.isNil(storage)) {
-      return this._createFailureStreamResponse();
-    }
-
-    return this._streamSuccessReadTarBall(storage, filename);
-  }
-
-  /**
-   * Return a stream that emits a read failure.
-   * @private
-   * @return {ReadTarball}
-   */
-  private _createFailureStreamResponse(): IReadTarball {
-    const stream: IReadTarball = new ReadTarball({});
-
-    process.nextTick((): void => {
-      stream.emit('error', errorUtils.getNotFound('no such file available'));
-    });
-    return stream;
-  }
-
-  /**
-   * Return a stream that emits the tarball data
-   * @param {Object} storage
-   * @param {String} filename
-   * @private
-   * @return {ReadTarball}
-   */
-  private _streamSuccessReadTarBall(storage: any, filename: string): IReadTarball {
-    const stream: IReadTarball = new ReadTarball({});
-    const readTarballStream = storage.readTarball(filename);
-    const e404 = errorUtils.getNotFound;
-
-    stream.abort = function (): void {
-      if (_.isNil(readTarballStream) === false) {
-        readTarballStream.abort();
-      }
-    };
-
-    readTarballStream.on('error', function (err) {
-      // @ts-ignore
-      if (err.code === STORAGE.NO_SUCH_FILE_ERROR || err.code === HTTP_STATUS.NOT_FOUND) {
-        stream.emit('error', e404('no such file available'));
-      } else {
-        stream.emit('error', err);
-      }
-    });
-
-    readTarballStream.on('content-length', function (content): void {
-      stream.emit('content-length', content);
-    });
-
-    readTarballStream.on('open', function (): void {
-      // re-emitting open because it's handled in storage.js
-      stream.emit('open');
-      readTarballStream.pipe(stream);
-    });
-
-    return stream;
-  }
-
-  public async getPackageMetadataNext(name: string): Promise<Package> {
-    const storage: IPackageStorage = this._getLocalStorage(name);
-    debug('get package metadata for %o', name);
-    if (typeof storage === 'undefined') {
-      // TODO: this might be a better an error to throw
-      // if storage is not there cannot be 404.
-      throw errorUtils.getNotFound();
-    }
-
-    return await this._readPackageNext(name, storage);
-  }
-
-  /**
    * Retrieve a package by name.
    * @param {*} name
    * @param {*} callback
    * @return {Function}
-   * @deprecated
+   * @deprecated use abstract this.getPackageLocalMetadata
    */
   public getPackageMetadata(name: string, callback: Callback = (): void => {}): void {
     const storage: IPackageStorage = this._getLocalStorage(name);
@@ -1003,6 +637,7 @@ class LocalStorage {
    * Retrieve a wrapper that provide access to the package location.
    * @param {Object} pkgName package name.
    * @return {Object}
+   * @deprecated use Abstract Storage:getPrivatePackageStorage
    */
   private _getLocalStorage(pkgName: string): IPackageStorage {
     debug('get local storage for %o', pkgName);
@@ -1052,12 +687,12 @@ class LocalStorage {
    * @param {*} pkgName
    * @param {*} callback
    * @return {Function}
+   * @deprecated use readCreatePackageNext
    */
   private _readCreatePackage(pkgName: string, callback: Callback): void {
     const storage: any = this._getLocalStorage(pkgName);
     if (_.isNil(storage)) {
-      this._createNewPackage(pkgName, callback);
-      return;
+      return callback(errorUtils.getInternalError('storage could not be found'));
     }
 
     storage.readPackage(pkgName, (err, data): void => {
@@ -1074,8 +709,42 @@ class LocalStorage {
     });
   }
 
+  /**
+   * Create or read a package.
+   *
+   * If the package already exists, it will be read.
+   * If the package is not found, it will be created.
+   * If the error is anything else will throw an error
+   *
+   * @param {*} pkgName
+   * @param {*} callback
+   * @return {Function}
+   */
+  private async readCreatePackageNext(pkgName: string): Promise<Manifest> {
+    const storage: any = this._getLocalStorage(pkgName);
+    if (_.isNil(storage)) {
+      throw errorUtils.getInternalError('storage could not be found');
+    }
+
+    try {
+      const result: Manifest = await storage.readPackageNext(pkgName);
+      return normalizePackage(result);
+    } catch (err: any) {
+      if (err.code === STORAGE.NO_SUCH_FILE_ERROR || err.code === HTTP_STATUS.NOT_FOUND) {
+        return this._createNewPackageNext(pkgName);
+      } else {
+        throw this._internalError(err, STORAGE.PACKAGE_FILE_NAME, 'error reading');
+      }
+    }
+  }
+
+  // @deprecated use _createNewPackageNext
   private _createNewPackage(name: string, callback: Callback): Callback {
     return callback(null, normalizePackage(generatePackageTemplate(name)));
+  }
+
+  private _createNewPackageNext(name: string): Manifest {
+    return normalizePackage(generatePackageTemplate(name));
   }
 
   /**
@@ -1122,10 +791,13 @@ class LocalStorage {
    * @param {*} updateHandler function(package, cb) - update function
    * @param {*} callback callback that gets invoked after it's all updated
    * @return {Function}
+   * // TODO: Remove, moved to abstract
+   * // TODO: Remove, moved to abstract
+   * // TODO: Remove, moved to abstract
    */
   private async updatePackageNext(
     name: string,
-    updateHandler: (manifest: Package) => Promise<Package>
+    updateHandler: (manifest: Manifest) => Promise<Manifest>
   ): Promise<void> {
     const storage: IPackageStorage = this._getLocalStorage(name);
 
@@ -1155,6 +827,7 @@ class LocalStorage {
    * @param {*} json
    * @param {*} callback
    * @return {Function}
+   * @deprecated use writePackageNext
    */
   private _writePackage(name: string, json: Package, callback: Callback): void {
     const storage: any = this._getLocalStorage(name);
@@ -1164,6 +837,7 @@ class LocalStorage {
     storage.savePackage(name, this._setDefaultRevision(json), callback);
   }
 
+  // TODO: Remove, moved to abstract
   private async writePackageNext(name: string, json: Package): Promise<void> {
     const storage: any = this._getLocalStorage(name);
     if (_.isNil(storage)) {
@@ -1173,6 +847,7 @@ class LocalStorage {
     await storage.savePackageNext(name, this._setDefaultRevision(json));
   }
 
+  // TODO: Remove, moved to abstract
   private _setDefaultRevision(json: Package): Package {
     // calculate revision from couch db
     if (_.isString(json._rev) === false) {
@@ -1213,19 +888,18 @@ class LocalStorage {
    * @param {Object} hash metadata
    * @param {String} upLinkKey registry key
    * @private
+   * @deprecated use _updateUplinkToRemoteProtocolNext
    */
   private _updateUplinkToRemoteProtocol(hash: DistFile, upLinkKey: string): void {
     // if we got this information from a known registry,
     // use the same protocol for the tarball
-    //
-    // see https://github.com/rlidwka/sinopia/issues/166
-    const tarballUrl: any = UrlNode.parse(hash.url);
-    const uplinkUrl: any = UrlNode.parse(this.config.uplinks[upLinkKey].url);
+    const tarballUrl: any = URL.parse(hash.url);
+    const uplinkUrl: any = URL.parse(this.config.uplinks[upLinkKey].url);
 
     if (uplinkUrl.host === tarballUrl.host) {
       tarballUrl.protocol = uplinkUrl.protocol;
       hash.registry = upLinkKey;
-      hash.url = UrlNode.format(tarballUrl);
+      hash.url = URL.format(tarballUrl);
     }
   }
 

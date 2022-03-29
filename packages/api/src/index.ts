@@ -62,7 +62,7 @@ export default function (config: Config, auth: IAuth, storage: Storage): Router 
   search(app);
   user(app, auth, config);
   distTags(app, auth, storage);
-  publish(app, auth, storage, config);
+  publish(app, auth, storage);
   ping(app);
   stars(app, storage);
   // @ts-ignore

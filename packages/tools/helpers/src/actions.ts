@@ -9,13 +9,16 @@ import { generatePackageMetadata } from './generatePackageMetadata';
 export function publishVersion(app, pkgName, version, metadata: Partial<Manifest> = {}): any {
   const pkgMetadata = { ...generatePackageMetadata(pkgName, version), ...metadata };
 
-  return supertest(app)
-    .put(`/${encodeURIComponent(pkgName)}`)
-    .set(HEADER_TYPE.CONTENT_TYPE, HEADERS.JSON)
-    .send(JSON.stringify(pkgMetadata))
-    .set('accept', HEADERS.GZIP)
-    .set(HEADER_TYPE.ACCEPT_ENCODING, HEADERS.JSON)
-    .set(HEADER_TYPE.CONTENT_TYPE, HEADERS.JSON);
+  return (
+    supertest(app)
+      // @ts-ignore
+      .put(`/${encodeURIComponent(pkgName)}`)
+      .set(HEADER_TYPE.CONTENT_TYPE, HEADERS.JSON)
+      .send(JSON.stringify(pkgMetadata))
+      .set('accept', HEADERS.GZIP)
+      .set(HEADER_TYPE.ACCEPT_ENCODING, HEADERS.JSON)
+      .set(HEADER_TYPE.CONTENT_TYPE, HEADERS.JSON)
+  );
 }
 
 export async function publishTaggedVersion(app, pkgName, version, tag) {
@@ -23,16 +26,19 @@ export async function publishTaggedVersion(app, pkgName, version, tag) {
     [tag]: version,
   });
 
-  return supertest(app)
-    .put(
-      `/${encodeURIComponent(pkgName)}/${encodeURIComponent(version)}/-tag/${encodeURIComponent(
-        tag
-      )}`
-    )
-    .set(HEADER_TYPE.CONTENT_TYPE, HEADERS.JSON)
-    .send(JSON.stringify(pkgMetadata))
-    .expect(HTTP_STATUS.CREATED)
-    .set('accept', HEADERS.GZIP)
-    .set(HEADER_TYPE.ACCEPT_ENCODING, HEADERS.JSON)
-    .set(HEADER_TYPE.CONTENT_TYPE, HEADERS.JSON) as Test;
+  return (
+    supertest(app)
+      // @ts-ignore
+      .put(
+        `/${encodeURIComponent(pkgName)}/${encodeURIComponent(version)}/-tag/${encodeURIComponent(
+          tag
+        )}`
+      )
+      .set(HEADER_TYPE.CONTENT_TYPE, HEADERS.JSON)
+      .send(JSON.stringify(pkgMetadata))
+      .expect(HTTP_STATUS.CREATED)
+      .set('accept', HEADERS.GZIP)
+      .set(HEADER_TYPE.ACCEPT_ENCODING, HEADERS.JSON)
+      .set(HEADER_TYPE.CONTENT_TYPE, HEADERS.JSON) as Test
+  );
 }

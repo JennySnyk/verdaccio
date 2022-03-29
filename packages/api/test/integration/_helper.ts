@@ -1,82 +1,57 @@
-import bodyParser from 'body-parser';
-import express, { Application } from 'express';
+import { Application } from 'express';
 import path from 'path';
 import supertest from 'supertest';
 
-import { Auth, IAuth } from '@verdaccio/auth';
-import { Config, parseConfigFile } from '@verdaccio/config';
+import { parseConfigFile } from '@verdaccio/config';
 import { HEADERS, HEADER_TYPE, HTTP_STATUS } from '@verdaccio/core';
-import { errorReportingMiddleware, final, handleError } from '@verdaccio/middleware';
+import { setup } from '@verdaccio/logger';
 import { Storage } from '@verdaccio/store';
-import { generatePackageMetadata } from '@verdaccio/test-helper';
+import {
+  generatePackageMetadata,
+  initializeServer as initializeServerHelper,
+} from '@verdaccio/test-helper';
+import { GenericBody } from '@verdaccio/types';
+import { generateRandomHexString } from '@verdaccio/utils';
 
-import apiEndpoints from '../../src';
+import apiMiddleware from '../../src';
 
-const getConf = (conf) => {
+setup();
+
+export const getConf = (conf) => {
   const configPath = path.join(__dirname, 'config', conf);
-
-  return parseConfigFile(configPath);
+  const config = parseConfigFile(configPath);
+  // custom config to avoid conflict with other tests
+  config.auth.htpasswd.file = `${config.auth.htpasswd.file}-${generateRandomHexString()}`;
+  return config;
 };
 
-// TODO: replace by @verdaccio/test-helper
 export async function initializeServer(configName): Promise<Application> {
-  const app = express();
-  const config = new Config(getConf(configName));
-  const storage = new Storage(config);
-  await storage.init(config, []);
-  const auth: IAuth = new Auth(config);
-  // TODO: this might not be need it, used in apiEndpoints
-  app.use(bodyParser.json({ strict: false, limit: '10mb' }));
-  // @ts-ignore
-  app.use(errorReportingMiddleware);
-  // @ts-ignore
-  app.use(apiEndpoints(config, auth, storage));
-  // @ts-ignore
-  app.use(handleError);
-  // @ts-ignore
-  app.use(final);
-
-  app.use(function (request, response) {
-    response.status(590);
-    console.log('respo', response);
-    response.json({ error: 'cannot handle this' });
-  });
-
-  return app;
+  return initializeServerHelper(getConf(configName), [apiMiddleware], Storage);
 }
 
-export function publishVersion(app, _configFile, pkgName, version): supertest.Test {
-  const pkgMetadata = generatePackageMetadata(pkgName, version);
+export function createUser(app, name: string, password: string): supertest.Test {
+  return supertest(app)
+    .put(`/-/user/org.couchdb.user:${name}`)
+    .send({
+      name: name,
+      password: password,
+    })
+    .expect(HEADER_TYPE.CONTENT_TYPE, HEADERS.JSON_CHARSET)
+    .expect(HTTP_STATUS.CREATED);
+}
+
+export function publishVersion(
+  app,
+  pkgName: string,
+  version: string,
+  distTags?: GenericBody
+): supertest.Test {
+  const pkgMetadata = generatePackageMetadata(pkgName, version, distTags);
 
   return supertest(app)
     .put(`/${encodeURIComponent(pkgName)}`)
     .set(HEADER_TYPE.CONTENT_TYPE, HEADERS.JSON)
     .send(JSON.stringify(pkgMetadata))
-    .set('accept', HEADERS.GZIP)
-    .set(HEADER_TYPE.ACCEPT_ENCODING, HEADERS.JSON)
-    .set(HEADER_TYPE.CONTENT_TYPE, HEADERS.JSON);
-}
-
-export async function publishTaggedVersion(
-  app,
-  configFile,
-  pkgName: string,
-  version: string,
-  tag: string
-) {
-  const pkgMetadata = generatePackageMetadata(pkgName, version, {
-    [tag]: version,
-  });
-
-  return supertest(app)
-    .put(
-      `/${encodeURIComponent(pkgName)}/${encodeURIComponent(version)}/-tag/${encodeURIComponent(
-        tag
-      )}`
-    )
-    .set(HEADER_TYPE.CONTENT_TYPE, HEADERS.JSON)
-    .send(JSON.stringify(pkgMetadata))
-    .expect(HTTP_STATUS.CREATED)
     .set('accept', HEADERS.GZIP)
     .set(HEADER_TYPE.ACCEPT_ENCODING, HEADERS.JSON)
     .set(HEADER_TYPE.CONTENT_TYPE, HEADERS.JSON);

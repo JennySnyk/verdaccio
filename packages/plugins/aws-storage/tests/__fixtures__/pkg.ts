@@ -19,7 +19,7 @@ const json: Package = {
       keywords: [],
       author: {
         name: 'Juan Picado',
-        email: 'juan@jotadeveloper.com',
+        email: 'juan@domain.com',
       },
       license: 'ISC',
       dependencies: {

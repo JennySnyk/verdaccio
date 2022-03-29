@@ -3,10 +3,10 @@ import semver from 'semver';
 
 import { errorUtils, pkgUtils, validatioUtils } from '@verdaccio/core';
 import { API_ERROR, DIST_TAGS, HTTP_STATUS, USERS } from '@verdaccio/core';
-import { AttachMents, Package, StringValue, Version, Versions } from '@verdaccio/types';
-import { generateRandomHexString, isNil, isObject, normalizeDistTags } from '@verdaccio/utils';
+import { AttachMents, Manifest, Version, Versions } from '@verdaccio/types';
+import { generateRandomHexString, isNil, isObject } from '@verdaccio/utils';
 
-import { LocalStorage } from './local-storage';
+import { sortVersionsAndFilterInvalid } from './versions-utils';
 
 export const STORAGE = {
   PACKAGE_FILE_NAME: 'package.json',
@@ -15,7 +15,12 @@ export const STORAGE = {
   DEFAULT_REVISION: '0-0000000000000000',
 };
 
-export function generatePackageTemplate(name: string): Package {
+/**
+ * Create a new package in the storage, return a boilerplate package
+ * @param name package name
+ * @returns {Manifest}
+ */
+export function generatePackageTemplate(name: string): Manifest {
   return {
     // standard things
     name,
@@ -34,7 +39,7 @@ export function generatePackageTemplate(name: string): Package {
  * Normalize package properties, tags, revision id.
  * @param {Object} pkg package reference.
  */
-export function normalizePackage(pkg: Package): Package {
+export function normalizePackage(pkg: Manifest): Manifest {
   const pkgProperties = ['versions', 'dist-tags', '_distfiles', '_attachments', '_uplinks', 'time'];
 
   pkgProperties.forEach((key): void => {
@@ -45,11 +50,11 @@ export function normalizePackage(pkg: Package): Package {
     }
   });
 
-  if (_.isString(pkg._rev) === false) {
+  if (typeof pkg?._rev !== 'string') {
     pkg._rev = STORAGE.DEFAULT_REVISION;
   }
 
-  if (_.isString(pkg._id) === false) {
+  if (typeof pkg?._id !== 'string') {
     pkg._id = pkg.name;
   }
 
@@ -63,7 +68,7 @@ export function generateRevision(rev: string): string {
   return (+_rev[0] || 0) + 1 + '-' + generateRandomHexString();
 }
 
-export function getLatestReadme(pkg: Package): string {
+export function getLatestReadme(pkg: Manifest): string {
   const versions = pkg['versions'] || {};
   const distTags = pkg[DIST_TAGS] || {};
   // FIXME: here is a bit tricky add the types
@@ -106,7 +111,7 @@ export const WHITELIST = [
   'users',
 ];
 
-export function cleanUpLinksRef(result: Package, keepUpLinkData?: boolean): Package {
+export function cleanUpLinksRef(result: Manifest, keepUpLinkData?: boolean): Manifest {
   const propertyToKeep = [...WHITELIST];
   if (keepUpLinkData === true) {
     propertyToKeep.push('_uplinks');
@@ -122,40 +127,8 @@ export function cleanUpLinksRef(result: Package, keepUpLinkData?: boolean): Pack
   return result;
 }
 
-/**
- * Check whether a package it is already a local package
- * @param {*} name
- * @param {*} localStorage
- */
-export function checkPackageLocal(name: string, localStorage: LocalStorage): Promise<any> {
-  return new Promise<void>((resolve, reject): void => {
-    localStorage.getPackageMetadata(name, (err, results): void => {
-      if (!isNil(err) && err.status !== HTTP_STATUS.NOT_FOUND) {
-        return reject(err);
-      }
-      if (results) {
-        return reject(errorUtils.getConflict(API_ERROR.PACKAGE_EXIST));
-      }
-      return resolve();
-    });
-  });
-}
-
-export function publishPackage(
-  name: string,
-  metadata: any,
-  localStorage: LocalStorage
-): Promise<any> {
-  return new Promise<void>((resolve, reject): void => {
-    localStorage.addPackage(name, metadata, (err): void => {
-      if (!_.isNull(err)) {
-        return reject(err);
-      }
-      return resolve();
-    });
-  });
-}
-
+// TODO: move to abstract storage
+// @deprecated use abstract.storage.ts:checkPackageRemote
 export function checkPackageRemote(
   name: string,
   isAllowPublishOffline: boolean,
@@ -192,7 +165,8 @@ export function checkPackageRemote(
   });
 }
 
-export function mergeUplinkTimeIntoLocal(localMetadata: Package, remoteMetadata: Package): any {
+// @deprecated use export function mergeUplinkTimeIntoLocalNext
+export function mergeUplinkTimeIntoLocal(localMetadata: Manifest, remoteMetadata: Manifest): any {
   if ('time' in remoteMetadata) {
     return Object.assign({}, localMetadata.time, remoteMetadata.time);
   }
@@ -200,7 +174,33 @@ export function mergeUplinkTimeIntoLocal(localMetadata: Package, remoteMetadata:
   return localMetadata.time;
 }
 
-export function prepareSearchPackage(data: Package): any {
+export function mergeUplinkTimeIntoLocalNext(
+  cacheManifest: Manifest,
+  remoteManifest: Manifest
+): Manifest {
+  if ('time' in remoteManifest) {
+    // remote override cache time conflicts
+    return { ...cacheManifest, time: { ...cacheManifest.time, ...remoteManifest.time } };
+  }
+
+  return cacheManifest;
+}
+
+export function updateUpLinkMetadata(uplinkId, manifest: Manifest, etag: string) {
+  const _uplinks = {
+    ...manifest._uplinks,
+    [uplinkId]: {
+      etag,
+      fetched: Date.now(),
+    },
+  };
+  return {
+    ...manifest,
+    _uplinks,
+  };
+}
+
+export function prepareSearchPackage(data: Manifest): any {
   const latest = pkgUtils.getLatest(data);
 
   if (latest && data.versions[latest]) {
@@ -228,27 +228,12 @@ export function prepareSearchPackage(data: Package): any {
   }
 }
 
-/**
- * Create a tag for a package
- * @param {*} data
- * @param {*} version
- * @param {*} tag
- * @return {Boolean} whether a package has been tagged
- */
-export function tagVersion(data: Package, version: string, tag: StringValue): boolean {
-  if (tag && data[DIST_TAGS][tag] !== version && semver.parse(version, true)) {
-    // valid version - store
-    data[DIST_TAGS][tag] = version;
-    return true;
-  }
-  return false;
-}
-
 export function isDifferentThanOne(versions: Versions | AttachMents): boolean {
   return Object.keys(versions).length !== 1;
 }
 
-export function hasInvalidPublishBody(manifest: Pick<Package, '_attachments' | 'versions'>) {
+// @deprecated use validationUtils.validatePublishNewPackage
+export function hasInvalidPublishBody(manifest: Pick<Manifest, '_attachments' | 'versions'>) {
   if (!manifest) {
     return false;
   }
@@ -260,4 +245,112 @@ export function hasInvalidPublishBody(manifest: Pick<Package, '_attachments' | '
     isObject(versions) === false ||
     isDifferentThanOne(versions);
   return res;
+}
+
+/**
+ * Function gets a local info and an info from uplinks and tries to merge it
+ exported for unit tests only.
+  * @param {*} local
+  * @param {*} remoteManifest
+  * @param {*} config configuration file
+  */
+export function mergeVersions(cacheManifest: Manifest, remoteManifest: Manifest): Manifest {
+  let _cacheManifest = { ...cacheManifest };
+  const { versions } = remoteManifest;
+  // copy new versions to a cache
+  // NOTE: if a certain version was updated, we can't refresh it reliably
+  for (const i in versions) {
+    if (typeof cacheManifest.versions[i] === 'undefined') {
+      _cacheManifest.versions[i] = versions[i];
+    }
+  }
+
+  for (const distTag in remoteManifest[DIST_TAGS]) {
+    if (_cacheManifest[DIST_TAGS][distTag] !== remoteManifest[DIST_TAGS][distTag]) {
+      if (
+        !_cacheManifest[DIST_TAGS][distTag] ||
+        semver.lte(_cacheManifest[DIST_TAGS][distTag], remoteManifest[DIST_TAGS][distTag])
+      ) {
+        _cacheManifest[DIST_TAGS][distTag] = remoteManifest[DIST_TAGS][distTag];
+      }
+      if (
+        distTag === 'latest' &&
+        _cacheManifest[DIST_TAGS][distTag] === remoteManifest[DIST_TAGS][distTag]
+      ) {
+        // NOTE: this override the latest publish readme from local cache with
+        // the remote one
+        cacheManifest = { ..._cacheManifest, readme: remoteManifest.readme };
+      }
+    }
+  }
+
+  return cacheManifest;
+}
+
+/**
+ * Normalize dist-tags.
+ *
+ * There is a legacy behaviour where the dist-tags could be an array, in such
+ * case, the array is orderded and the highest version becames the
+ * latest.
+ *
+ * The dist-tag tags must be plain strigs, if the latest is empty (for whatever reason) is
+ * normalized to be the highest version available.
+ *
+ * This function cleans up every invalid version on dist-tags, but does not remove
+ * invalid versions from the manifest.
+ *
+ * @param {*} data
+ */
+export function normalizeDistTags(manifest: Manifest): Manifest {
+  let sorted;
+  // handle missing latest dist-tag
+  if (!manifest[DIST_TAGS].latest) {
+    // if there is no latest tag, set the highest known version based on semver sort
+    sorted = sortVersionsAndFilterInvalid(Object.keys(manifest.versions));
+    if (sorted?.length) {
+      // get the highest published version
+      manifest[DIST_TAGS].latest = sorted.pop();
+    }
+  }
+
+  for (const tag in manifest[DIST_TAGS]) {
+    // deprecated (will be removed un future majors)
+    // this should not happen, tags should be plain strings, legacy fallback
+    if (_.isArray(manifest[DIST_TAGS][tag])) {
+      if (manifest[DIST_TAGS][tag].length) {
+        // sort array
+        // FIXME: this is clearly wrong, we need to research why this is like this.
+        // @ts-ignore
+        sorted = sortVersionsAndFilterInvalid(manifest[DIST_TAGS][tag]);
+        if (sorted.length) {
+          // use highest version based on semver sort
+          manifest[DIST_TAGS][tag] = sorted.pop();
+        }
+      } else {
+        delete manifest[DIST_TAGS][tag];
+      }
+    } else if (_.isString(manifest[DIST_TAGS][tag])) {
+      if (!semver.parse(manifest[DIST_TAGS][tag], true)) {
+        // if the version is invalid, delete the dist-tag entry
+        delete manifest[DIST_TAGS][tag];
+      }
+    }
+  }
+
+  return manifest;
+}
+
+export function hasDeprecatedVersions(pkgInfo: Manifest): boolean {
+  const { versions } = pkgInfo;
+  for (const version in versions) {
+    if (Object.prototype.hasOwnProperty.call(versions[version], 'deprecated')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isDeprecatedManifest(manifest: Manifest): boolean {
+  return hasDeprecatedVersions(manifest) && Object.keys(manifest._attachments).length === 0;
 }

@@ -1,14 +1,25 @@
 import fs from 'fs';
 import path from 'path';
-import { dirSync } from 'tmp-promise';
+import { Readable } from 'stream';
 
-import { ILocalPackageManager, Logger, Package } from '@verdaccio/types';
+import { fileUtils } from '@verdaccio/core';
+import { createTempFolder } from '@verdaccio/test-helper';
+import { ILocalPackageManager, Logger, Manifest, Package } from '@verdaccio/types';
 
 import LocalDriver, { fSError, fileExist, noSuchFile, resourceNotAvailable } from '../src/local-fs';
 import pkg from './__fixtures__/pkg';
 
 let localTempStorage: string;
 const pkgFileName = 'package.json';
+
+// returns a promise which resolves true if file exists:
+function checkFileExists(filepath) {
+  return new Promise((resolve) => {
+    fs.access(filepath, fs.constants.F_OK, (error) => {
+      resolve(!error);
+    });
+  });
+}
 
 const logger: Logger = {
   error: jest.fn(),
@@ -22,13 +33,9 @@ const logger: Logger = {
 
 describe('Local FS test', () => {
   let tmpFolder;
-  beforeAll(() => {
-    tmpFolder = dirSync({ unsafeCleanup: true });
-    localTempStorage = path.join(tmpFolder.name, './_storage');
-  });
-
-  afterAll(() => {
-    // tmpFolder.removeCallback();
+  beforeEach(async () => {
+    tmpFolder = await fileUtils.createTempFolder('local-fs');
+    localTempStorage = path.join(tmpFolder, './_storage');
   });
 
   describe('savePackage() group', () => {
@@ -94,19 +101,29 @@ describe('Local FS test', () => {
     test('createPackage() fails by fileExist', (done) => {
       const localFs = new LocalDriver(path.join(localTempStorage, 'createPackage'), logger);
 
-      localFs.createPackage(path.join(localTempStorage, 'package5'), pkg, (err) => {
-        expect(err).not.toBeNull();
-        expect(err.code).toBe(fileExist);
-        done();
+      localFs.createPackage(path.join(localTempStorage, 'package5'), pkg, () => {
+        localFs.createPackage(path.join(localTempStorage, 'package5'), pkg, (err) => {
+          expect(err).not.toBeNull();
+          expect(err.code).toBe(fileExist);
+          done();
+        });
       });
     });
 
-    describe('deletePackage() group', () => {
-      test('deletePackage()', async () => {
+    describe.skip('deletePackage() group', () => {
+      test('should delete a package', async () => {
         const localFs = new LocalDriver(path.join(localTempStorage, 'createPackage'), logger);
-
+        await localFs.createPackagNext('createPackage', pkg as unknown as Manifest);
         // verdaccio removes the package.json instead the package name
         await localFs.deletePackage('package.json');
+        // verify if the `package.json` does not exist anymore
+        // note: the folder still remains
+        await expect(checkFileExists(localFs._getStorage('package.json'))).resolves.toBeFalsy();
+      });
+      test('should fails on delete a package', async () => {
+        const localFs = new LocalDriver(path.join(localTempStorage, 'createPackage'), logger);
+        // verdaccio removes the package.json instead the package name
+        await expect(localFs.deletePackage('package.json')).rejects.toThrow('ENOENT');
       });
     });
   });
@@ -134,7 +151,91 @@ describe('Local FS test', () => {
     });
   });
 
-  describe('readTarball', () => {
+  describe('writeTarballNext', () => {
+    test('should write a tarball', (done) => {
+      const abort = new AbortController();
+      const tmp = createTempFolder('local-fs-write-tarball');
+      const localFs = new LocalDriver(tmp, logger);
+      const readableStream = Readable.from('foooo');
+      // TODO: verify file exist
+      localFs.writeTarballNext('juan-1.0.0.tgz', { signal: abort.signal }).then((stream) => {
+        stream.on('finish', () => {
+          done();
+        });
+        readableStream.pipe(stream);
+      });
+    });
+  });
+
+  describe('readTarballNext', () => {
+    test('should read a tarball', (done) => {
+      const abort = new AbortController();
+      const localFs = new LocalDriver(
+        path.join(__dirname, '__fixtures__/readme-test-next'),
+        logger
+      );
+      localFs.readTarballNext('test-readme-0.0.0.tgz', { signal: abort.signal }).then((stream) => {
+        stream.on('data', (data) => {
+          expect(data.length).toEqual(352);
+        });
+        stream.on('end', () => {
+          done();
+        });
+      });
+    });
+
+    test('should aboort read a tarball', (done) => {
+      const abort = new AbortController();
+      const localFs = new LocalDriver(
+        path.join(__dirname, '__fixtures__/readme-test-next'),
+        logger
+      );
+      localFs.readTarballNext('test-readme-0.0.0.tgz', { signal: abort.signal }).then((stream) => {
+        stream.on('error', (error: any) => {
+          expect(error.code).toEqual('ABORT_ERR');
+          done();
+        });
+        abort.abort();
+      });
+    });
+
+    test('fails on read a tarball doex not exist', (done) => {
+      const abort = new AbortController();
+
+      const localFs = new LocalDriver(
+        path.join(__dirname, '__fixtures__/readme-test-next'),
+        logger
+      );
+      localFs
+        .readTarballNext('does-not-exist-0.0.0.tgz', { signal: abort.signal })
+        .then((stream) => {
+          stream.on('error', (error: any) => {
+            expect(error.code).toEqual('ENOENT');
+            done();
+          });
+        });
+    });
+
+    test('should return content-length', (done) => {
+      const localFs = new LocalDriver(
+        path.join(__dirname, '__fixtures__/readme-test-next'),
+        logger
+      );
+      const abort = new AbortController();
+
+      localFs.readTarballNext('test-readme-0.0.0.tgz', { signal: abort.signal }).then((stream) => {
+        stream.on('data', (data) => {
+          expect(data.length).toEqual(352);
+        });
+        stream.on('content-length', (content) => {
+          expect(content).toEqual(352);
+          done();
+        });
+      });
+    });
+  });
+
+  describe('readTarball (deprecated)', () => {
     test('should read tarball successfully', (done) => {
       const localFs: ILocalPackageManager = new LocalDriver(
         path.join(__dirname, '__fixtures__/readme-test'),

@@ -1,6 +1,6 @@
 import _ from 'lodash';
 
-import { Package } from '@verdaccio/types';
+import { Manifest } from '@verdaccio/types';
 
 import { Users } from '.';
 
@@ -9,13 +9,19 @@ import { Users } from '.';
  * @param pkg metadata
  */
 
-export function isPublishablePackage(pkg: Package): boolean {
+/**
+ * Check whether the package metadta has enough data to be published
+ * @param pkg metadata
+ */
+export function isPublishablePackage(pkg: Manifest): boolean {
+  // TODO: we can do better, no need get keys
   const keys: string[] = Object.keys(pkg);
 
-  return _.includes(keys, 'versions');
+  return keys.includes('versions');
 }
 
-export function isRelatedToDeprecation(pkgInfo: Package): boolean {
+// @deprecated don't think this is used anymore (REMOVE)
+export function isRelatedToDeprecation(pkgInfo: Manifest): boolean {
   const { versions } = pkgInfo;
   for (const version in versions) {
     if (Object.prototype.hasOwnProperty.call(versions[version], 'deprecated')) {

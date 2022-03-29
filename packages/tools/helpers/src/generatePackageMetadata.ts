@@ -4,6 +4,179 @@ export interface DistTags {
   [key: string]: string;
 }
 
+export function addNewVersion(
+  manifest: Manifest,
+  version: string,
+  isRemote: boolean = true,
+  domain: string = 'http://localhost:5555'
+): Manifest {
+  const currentVersions = Object.keys(manifest.versions);
+  if (currentVersions.includes(version)) {
+    throw new Error(`Version ${version} already exists`);
+  }
+
+  const newManifest = { ...manifest };
+  newManifest.versions[version] = {
+    name: manifest.name,
+    version,
+    description: manifest.description ?? '',
+    readme: '',
+    main: 'index.js',
+    scripts: { test: 'echo "Error: no test specified" && exit 1' },
+    keywords: [],
+    author: { name: 'User NPM', email: 'user@domain.com' },
+    license: 'ISC',
+    dependencies: { verdaccio: '^2.7.2' },
+    readmeFilename: 'README.md',
+    _id: `${manifest.name}@${version}`,
+    _npmVersion: '5.5.1',
+    _npmUser: { name: 'foo' },
+    dist: {
+      integrity: 'sha512-6gHiERpiDgtb3hjqpQHoPoH4g==',
+      shasum: '2c03764f651a9f016ca0b7620421457b619151b9',
+      tarball: `${domain}/${manifest.name}/-/${manifest.name}-${version}.tgz`,
+    },
+    contributors: [],
+  };
+  // update the latest with the new version
+  newManifest['dist-tags'] = { latest: version };
+  // add new version does not need attachmetns
+  if (isRemote) {
+    newManifest._distfiles = {
+      ...newManifest._distfiles,
+      [`${manifest.name}-${version}.tgz`]: {
+        sha: '2c03764f651a9f016ca0b7620421457b619151b9',
+        url: `${domain}/${manifest.name}/-/${manifest.name}-${version}.tgz`,
+      },
+    };
+  } else {
+    newManifest._attachments = {
+      ...newManifest._attachments,
+      [`${manifest.name}-${version}.tgz`]: {
+        shasum: '2c03764f651a9f016ca0b7620421457b619151b9', // pragma: allowlist secret
+        version: version,
+      },
+    };
+  }
+  return newManifest;
+}
+
+export function generateLocalPackageMetadata(
+  pkgName: string,
+  version = '1.0.0',
+  domain: string = 'http://localhost:5555'
+): Manifest {
+  // @ts-ignore
+  return {
+    _id: pkgName,
+    name: pkgName,
+    description: '',
+    'dist-tags': { ['latest']: version },
+    versions: {
+      [version]: {
+        name: pkgName,
+        version: version,
+        description: 'package generated',
+        main: 'index.js',
+        scripts: {
+          test: 'echo "Error: no test specified" && exit 1',
+        },
+        keywords: [],
+        author: {
+          name: 'User NPM',
+          email: 'user@domain.com',
+        },
+        license: 'ISC',
+        dependencies: {
+          verdaccio: '^2.7.2',
+        },
+        readme: '# test',
+        readmeFilename: 'README.md',
+        _id: `${pkgName}@${version}`,
+        _npmVersion: '5.5.1',
+        _npmUser: {
+          name: 'foo',
+        },
+        dist: {
+          integrity:
+            'sha512-6gHiERpiDgtb3hjqpQH5/i7zRmvYi9pmCjQf2ZMy3QEa9wVk9RgdZaPWUt7ZOnWUPFjcr9cm' +
+            'E6dUBf+XoPoH4g==',
+          shasum: '2c03764f651a9f016ca0b7620421457b619151b9', // pragma: allowlist secret
+          tarball: `${domain}/${pkgName}\/-\/${pkgName}-${version}.tgz`,
+        },
+      },
+    },
+    readme: '# test',
+    _attachments: {
+      [`${pkgName}-${version}.tgz`]: {
+        shasum: '2c03764f651a9f016ca0b7620421457b619151b9', // pragma: allowlist secret
+        version: version,
+      },
+    },
+    _uplinks: {},
+    _distfiles: {},
+    _rev: '',
+  };
+}
+
+export function generateRemotePackageMetadata(
+  pkgName: string,
+  version = '1.0.0',
+  domain: string = 'http://localhost:5555'
+): Manifest {
+  // @ts-ignore
+  return {
+    _id: pkgName,
+    name: pkgName,
+    description: '',
+    'dist-tags': { ['latest']: version },
+    versions: {
+      [version]: {
+        name: pkgName,
+        version: version,
+        description: 'package generated',
+        main: 'index.js',
+        scripts: {
+          test: 'echo "Error: no test specified" && exit 1',
+        },
+        keywords: [],
+        author: {
+          name: 'User NPM',
+          email: 'user@domain.com',
+        },
+        license: 'ISC',
+        dependencies: {
+          verdaccio: '^2.7.2',
+        },
+        readme: '# test',
+        readmeFilename: 'README.md',
+        _id: `${pkgName}@${version}`,
+        _npmVersion: '5.5.1',
+        _npmUser: {
+          name: 'foo',
+        },
+        dist: {
+          integrity:
+            'sha512-6gHiERpiDgtb3hjqpQH5/i7zRmvYi9pmCjQf2ZMy3QEa9wVk9RgdZaPWUt7ZOnWUPFjcr9cm' +
+            'E6dUBf+XoPoH4g==',
+          shasum: '2c03764f651a9f016ca0b7620421457b619151b9', // pragma: allowlist secret
+          tarball: `${domain}\/${pkgName}\/-\/${pkgName}-${version}.tgz`,
+        },
+      },
+    },
+    readme: '# test',
+    _attachments: {},
+    _uplinks: {},
+    _distfiles: {
+      [`${pkgName}-${version}.tgz`]: {
+        url: `${domain}/${pkgName}\/-\/${pkgName}-${version}.tgz`,
+        sha: '2c03764f651a9f016ca0b7620421457b619151b9', // pragma: allowlist secret
+      },
+    },
+    _rev: '',
+  };
+}
+
 export function generatePackageMetadata(
   pkgName: string,
   version = '1.0.0',
@@ -20,7 +193,7 @@ export function generatePackageMetadata(
       [version]: {
         name: pkgName,
         version: version,
-        description: 'package generated ',
+        description: 'package generated',
         main: 'index.js',
         scripts: {
           test: 'echo "Error: no test specified" && exit 1',
@@ -67,5 +240,8 @@ export function generatePackageMetadata(
         length: 512,
       },
     },
+    _uplinks: {},
+    _distfiles: {},
+    _rev: '',
   };
 }

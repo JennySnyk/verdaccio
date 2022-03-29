@@ -1,8 +1,21 @@
 import semver from 'semver';
+import URL from 'url';
 
 import { Package } from '@verdaccio/types';
 
 import { DIST_TAGS } from './constants';
+
+/**
+ * Extract the tarball name from a registry dist url
+ * 'https://registry.npmjs.org/test/-/test-0.0.2.tgz'
+ * @param tarball tarball url
+ * @returns tarball filename
+ */
+export function extractTarballName(tarball: string) {
+  const urlObject: any = URL.parse(tarball);
+  const filename = urlObject.pathname.replace(/^.*\//, '');
+  return filename;
+}
 
 /**
  * Function filters out bad semver versions and sorts the array.
@@ -42,7 +55,9 @@ export function getLatest(pkg: Package): string {
   * @param {*} local
   * @param {*} upstream
   * @param {*} config sds
+  * @deprecated use @verdaccio/storage mergeVersions method
   */
+// @deprecated
 export function mergeVersions(local: Package, upstream: Package) {
   // copy new versions to a cache
   // NOTE: if a certain version was updated, we can't refresh it reliably

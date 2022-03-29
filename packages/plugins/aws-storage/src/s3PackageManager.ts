@@ -1,7 +1,9 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { AWSError, S3 } from 'aws-sdk';
 import { HttpError } from 'http-errors';
+import { PassThrough, Writable } from 'stream';
 
-import { HEADERS, HTTP_STATUS, VerdaccioError } from '@verdaccio/core';
+import { HEADERS, HTTP_STATUS, VerdaccioError, errorUtils } from '@verdaccio/core';
 import { ReadTarball, UploadTarball } from '@verdaccio/streams';
 import { Callback, CallbackAction, ILocalPackageManager, Logger, Package } from '@verdaccio/types';
 
@@ -65,6 +67,28 @@ export default class S3PackageManager implements ILocalPackageManager {
     } else {
       this.packagePath = `${this.config.keyPrefix}${this.packageName}`;
     }
+  }
+
+  public async writeTarballNext(pkgName: string, { signal }): Promise<Writable> {
+    // @ts-ignore
+    return new WritableStream({ write: () => {} });
+  }
+
+  public async hasTarball(fileName: string): Promise<boolean> {
+    throw new Error('not  implemented');
+  }
+
+  public async hasPackage(): Promise<boolean> {
+    return false;
+  }
+
+  public async createPackageNext(name: string, manifest: Package): Promise<void> {
+    return;
+  }
+
+  public async readPackageNext(name: string): Promise<Package> {
+    // @ts-ignore
+    return;
   }
 
   public updatePackage(
@@ -406,6 +430,13 @@ export default class S3PackageManager implements ILocalPackageManager {
     );
 
     return uploadStream;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  public async readTarballNext(pkgName: string, { signal }): Promise<PassThrough> {
+    const stream = new PassThrough();
+    stream.emit('error', errorUtils.getInternalError('not inplemented'));
+    return stream;
   }
 
   public readTarball(name: string): ReadTarball {

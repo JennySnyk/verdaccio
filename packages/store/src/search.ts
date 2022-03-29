@@ -7,11 +7,12 @@ import { PassThrough, Transform, pipeline } from 'stream';
 import { VerdaccioError } from '@verdaccio/core';
 import { errorUtils, searchUtils } from '@verdaccio/core';
 import { logger } from '@verdaccio/logger';
-import { IProxy, ProxyList, ProxySearchParams } from '@verdaccio/proxy';
+import { IProxy, ProxySearchParams } from '@verdaccio/proxy';
 import { Version } from '@verdaccio/types';
 
 import { LocalStorage } from './local-storage';
 import { Storage } from './storage';
+import { ProxyInstanceList } from './uplink-util';
 
 const debug = buildDebug('verdaccio:storage:search');
 export interface ISearchResult {
@@ -77,9 +78,9 @@ class TransFormResults extends Transform {
 }
 
 export class SearchManager {
-  public readonly uplinks: ProxyList;
+  public readonly uplinks: ProxyInstanceList;
   public readonly localStorage: LocalStorage;
-  constructor(uplinks: ProxyList, storage: LocalStorage) {
+  constructor(uplinks: ProxyInstanceList, storage: LocalStorage) {
     this.uplinks = uplinks;
     this.localStorage = storage;
   }
